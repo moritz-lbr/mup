@@ -20,3 +20,4 @@ simulation_parameters:
     batch_size: 256
     epochs: 10     # Epochs refers to the number of full passes through the training data
     save_loss_frequency: "epoch"  # Save training and test losses every n batches; set to "epoch" to save only at epoch end
+    loss_type: "mse"
