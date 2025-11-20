@@ -22,12 +22,13 @@ def assemble(config_path):
 
 def run_experiments(input_path: Path, output_path: Path = None) -> int:
     if str(input_path).endswith(".yaml"):
-        print(f"Running training for {input_path.name}")
         if not output_path:
             output_dir = Path("./logs") 
         else:
             output_dir = output_path
-        run_experiment(input_path, output_dir)
+        config = assemble(input_path)
+        print(f"Running training for {input_path.name}") 
+        run_experiment(config, output_dir)
 
     else:
         configs = input_path.joinpath("configs")
