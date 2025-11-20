@@ -75,17 +75,21 @@ class ParamScheme:
         na_base = 1.0 if mult_scaling == "one" else float(base_kernel[role][mult_scaling])
         nb_base = 1.0 if var_scaling  == "one" else float(base_kernel[role][var_scaling])
 
-        if self.name != "standard" and role == "out":
-            var_ratio  = (nb_cur**2 / nb_base)
-        else:
+        if self.name == "standard":
             var_ratio = nb_cur
-
-        if role == "in" or role == "out":
-            mult_ratio = (na_cur / na_base)
-        else:
             mult_ratio = na_cur
+        else:
+            if role == "out":
+                var_ratio  = (nb_cur**2 / nb_base)
+            else:
+                var_ratio = nb_cur
 
-   
+            if role == "in" or role == "out":
+                mult_ratio = (na_cur / na_base)
+            else:
+                mult_ratio = na_cur
+
+        
         kernel_inits = self.scale_init(nn.initializers.normal(stddev=float(var_ratio) ** (-b)), scale=float(mult_ratio**(-a)))
         return kernel_inits
 
@@ -125,7 +129,7 @@ class ParamScheme:
 
 STANDARD = ParamScheme(
     name="standard",
-    input_layer = [0.0, 0.0, 0.0],
+    input_layer = [0.0, 0.5, 0.0],
     output_layer = [0.0, 0.5, 0.0],
     hidden_layer = [0.0, 0.5, 0.0],
     n_var = {"in": "fan_in", 
@@ -134,8 +138,8 @@ STANDARD = ParamScheme(
     n_mult = {"in": "one", 
               "out": "one", 
               "hidden": "one"},
-    n_lr = {"in": "fan_out", 
-             "out": "fan_in", 
+    n_lr = {"in": "one", 
+             "out": "one", 
              "hidden": "one"}
 )
 
