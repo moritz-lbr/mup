@@ -9,6 +9,7 @@ from flax.training import train_state
 import optax
 import yaml
 import os 
+import pickle
 
 from mlp import MLP
 from param_schemes import SCHEMES # pyright: ignore[reportMissingImports]
@@ -78,8 +79,62 @@ def collect_files_with_ending(directory: Path, ending: str) -> List[Path]:
                 matches.append(Path(root) / filename)
     return matches
 
-def load_teacher_dataset(cfg) -> Tuple[np.ndarray, np.ndarray]:
-    base_dir = Path("datasets").joinpath(cfg.task)
+prefix = "/scratch/m/M.Rautenberg/projects/mup/datasets/"
+
+Filenames = {'batch1': prefix + 'cifar-10-batches-py/data_batch_1',
+             'batch2': prefix + 'cifar-10-batches-py/data_batch_2',
+             'batch3': prefix + 'cifar-10-batches-py/data_batch_3',
+             'batch4': prefix + 'cifar-10-batches-py/data_batch_4',
+             'batch5': prefix + 'cifar-10-batches-py/data_batch_5'
+             }
+
+test_path = prefix + 'cifar-10-batches-py/test_batch'
+
+def getImageData(filename):
+    with open(filename, 'rb') as fo:
+        dict = pickle.load(fo, encoding='latin1')
+        X = dict['data'].reshape((len(dict['data']), 3, 32, 32)).transpose(0, 2, 3, 1)
+        y = np.array(dict['labels'])
+    return X, y
+
+
+def load_all_cifar10_data():
+    """Loads all CIFAR-10 batches and concatenates them into train/test datasets."""
+    x_train_list, y_train_list = [], []
+
+    # Load all training batches
+    for name, path in Filenames.items():
+        X, y = getImageData(path)
+        x_train_list.append(X)
+        y_train_list.append(y)
+
+    # Concatenate all training data
+    x_train = np.concatenate(x_train_list, axis=0)
+    y_train = np.concatenate(y_train_list, axis=0)
+
+    # Load test data
+    x_test, y_test = getImageData(test_path)
+
+    # Convert to float and scale to [0,1]
+    x_train = x_train.astype(np.float32) / 255.0
+    x_test  = x_test.astype(np.float32) / 255.0
+
+    # Channel-wise z-score using TRAIN stats only
+    # shapes: mean/std -> (1,1,1,3)
+    mean = x_train.mean(axis=(0, 1, 2), keepdims=True)
+    std = x_train.std(axis=(0, 1, 2), keepdims=True)
+    std = np.maximum(std, 1e-7)  # avoid divide-by-zero
+    x_train = (x_train - mean) / std
+    x_test  = (x_test  - mean) / std
+
+    x_train = x_train.reshape(x_train.shape[0], 3072)
+    x_test = x_test.reshape(x_test.shape[0], 3072)
+
+    return x_train, y_train, x_test, y_test
+
+
+def load_teacher_dataset(path) -> Tuple[np.ndarray, np.ndarray]:
+    base_dir = Path("datasets").joinpath(path)
 
     # expected_folder = f"scheme-{cfg.param_scheme}_widths-{format_widths(cfg.widths)}"
     if base_dir.is_file():
@@ -140,6 +195,24 @@ def mse_loss(params, apply_fn, xb, yb, return_layer_act=False):
     else:
         preds = apply_fn({"params": params}, xb)
         return jnp.mean((preds - yb) ** 2)
+
+# def cross_entropy_loss(x, y, ignore_index=-100):
+def cross_entropy_loss(params, apply_fn, xb, yb, return_layer_act=False):
+    # x: (N, C), y: (N,)
+    if return_layer_act:
+        preds, acts = apply_fn({"params": params}, xb, capture_layer_acts=True)
+    else:
+        preds = apply_fn({"params": params}, xb)
+    
+    log_sum_exp = jnp.log(jnp.sum(jnp.exp(preds), axis=1))
+    rows = jnp.arange(preds.shape[0])
+    loss = -(preds[rows, yb.astype(jnp.int32)] - log_sum_exp)
+
+    # print(type(jnp.mean(loss, axis=0)))
+    if return_layer_act:
+        return jnp.mean(loss, axis=0), jnp.mean(acts, axis=0)
+    else: 
+        return jnp.mean(loss, axis=0)
 
 # ----------------------------
 # Grad norms (optional instrumentation)
@@ -222,6 +295,6 @@ def create_state(
         params=params,
         tx=tx,
         opt_state=tx.init(params),
-        lr_mults=lr_mults_vars,
+        lr_mults=lr_mults_vars
     )
     return state, model
