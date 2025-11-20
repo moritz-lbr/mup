@@ -6,32 +6,34 @@ import jax
 import jax.numpy as jnp
 import optax
 
-from utils import mse_loss, create_state, load_teacher_dataset
+from utils import mse_loss, cross_entropy_loss, create_state, load_teacher_dataset, load_all_cifar10_data
 
 
-@jax.jit
-def train_step(state, xb, yb):
-    def loss_fn(p):
-        return mse_loss(p, state.apply_fn, xb, yb)
-    grads = jax.grad(loss_fn)(state.params)
-    updates, new_opt_state = state.tx.update(grads, state.opt_state, state.params)
-    new_params = optax.apply_updates(state.params, updates)
-    return state.replace(params=new_params, opt_state=new_opt_state, step=state.step + 1)
+def make_train_step(loss_fn):
+    @jax.jit
+    def train_step(state, xb, yb):
+        grads = jax.grad(loss_fn)(state.params, state.apply_fn, xb, yb)
+        updates, new_opt_state = state.tx.update(grads, state.opt_state, state.params)
+        new_params = optax.apply_updates(state.params, updates)
+        return state.replace(params=new_params, opt_state=new_opt_state, step=state.step + 1)
+    return train_step
 
-def save_losses(history, state, xtr_full, ytr_full, xte_full, yte_full, epoch, total_epochs, progress):
-    train_loss = mse_loss(state.params, state.apply_fn, xtr_full, ytr_full)
-    test_loss, layer_activations = mse_loss(state.params, state.apply_fn, xte_full, yte_full, return_layer_act=True)
-    
-    history["train_loss"].append(float(train_loss))
-    history["test_loss"].append(float(test_loss))
-    history["layer_activations"].append(layer_activations.tolist())
-    if progress is not None:
-        progress(
-            epoch=epoch + 1,
-            total=total_epochs,
-            train_loss=float(train_loss),
-            test_loss=float(test_loss),
-        )
+def make_loss_saver(loss_fn):
+    def save_losses(history, state, xtr_full, ytr_full, xte_full, yte_full, epoch, total_epochs, progress):
+        train_loss = loss_fn(state.params, state.apply_fn, xtr_full, ytr_full)
+        test_loss, layer_activations = loss_fn(state.params, state.apply_fn, xte_full, yte_full, return_layer_act=True)
+        
+        history["train_loss"].append(float(train_loss))
+        history["test_loss"].append(float(test_loss))
+        history["layer_activations"].append(layer_activations.tolist())
+        if progress is not None:
+            progress(
+                epoch=epoch + 1,
+                total=total_epochs,
+                train_loss=float(train_loss),
+                test_loss=float(test_loss),
+            )
+    return save_losses
 
 
 def run_once(
@@ -51,21 +53,26 @@ def run_once(
 
     rng_source = np.random.default_rng()
 
-    inputs, targets = load_teacher_dataset(cfg)
-    total_samples = int(inputs.shape[0])
-    n_train, n_test = compute_split_counts(total_samples)
-    permutation = rng_source.permutation(total_samples)
-    test_idx = permutation[:n_test]
-    train_idx = permutation[n_test:]
-    if train_idx.size == 0:
-        train_idx = permutation[:-1]
-        test_idx = permutation[-1:]
-    xtr_np = inputs[train_idx]
-    ytr_np = targets[train_idx]
-    xte = inputs[test_idx]
-    yte = targets[test_idx]
-    if set(train_idx) & set(test_idx):
-        raise ValueError("Train and test sets overlap.")
+    if "teacher_data" in cfg.task:
+        inputs, targets = load_teacher_dataset(cfg.task)
+        total_samples = int(inputs.shape[0])
+        n_train, n_test = compute_split_counts(total_samples)
+        permutation = rng_source.permutation(total_samples)
+        test_idx = permutation[:n_test]
+        train_idx = permutation[n_test:]
+        if train_idx.size == 0:
+            train_idx = permutation[:-1]
+            test_idx = permutation[-1:]
+        xtr_np = inputs[train_idx]
+        ytr_np = targets[train_idx]
+        xte = inputs[test_idx]
+        yte = targets[test_idx]
+        if set(train_idx) & set(test_idx):
+            raise ValueError("Train and test sets overlap.")
+    else: 
+        xtr_np, ytr_np, xte, yte = load_all_cifar10_data()
+        total_samples = int(xtr_np.shape[0] + xte.shape[0])
+  
 
     xtr_np = np.asarray(xtr_np, dtype=np.float32)
     ytr_np = np.asarray(ytr_np, dtype=np.float32)
@@ -98,6 +105,16 @@ def run_once(
     batch_rng = rng_source
     batch_size = cfg.batch_size if cfg.batch_size and cfg.batch_size > 0 else len(xtr_np)
 
+    if cfg.loss_type == "mse":
+        loss_function = mse_loss
+    elif cfg.loss_type == "cross_entropy":
+        loss_function = cross_entropy_loss
+    else:
+        raise ValueError("The loss type specified in the config could not be found")
+    
+    train_step = make_train_step(loss_function)
+    save_losses = make_loss_saver(loss_function)
+
     for epoch in range(cfg.epochs):
         indices = batch_rng.permutation(len(xtr_np))
         if batch_size >= len(xtr_np):
@@ -127,13 +144,10 @@ def run_once(
     final_params = jax.device_get(state.params)
 
     dataset_info = {
+        "total": int(total_samples),
         "n_train": int(xtr_np.shape[0]),
         "n_test": int(xte_full.shape[0]),
-        "total": int(total_samples),
-        "test_split": float(
-            xte_full.shape[0] / max(1, total_samples)
-        ),
-        "save_loss_frequency": cfg.save_loss_frequency,
+        "test_split": float(test_split),
     }
 
     return {
